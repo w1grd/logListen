@@ -1,7 +1,7 @@
 
 # logListen
 
-**Author:** Perry Donham, W1GRD  
+**Author:** Perry Donham, W1GRD (perry@w1grd.radio)
 **Version:** 0.2 (September 11, 2024)
 
 logListen is a Python utility that listens for ADIF-formatted messages via UDP from any compatible ham radio logging program and forwards new QSO records to the QRZ XML API for automatic logbook updates.
