@@ -14,6 +14,7 @@ logListen is a Python utility that listens for ADIF-formatted messages via UDP f
 - [Usage](#usage)
 - [Logging](#logging)
 - [Troubleshooting](#troubleshooting)
+- [Running in the background](#background)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -73,6 +74,7 @@ Once you have set up the configuration file and installed the necessary dependen
 
 2. The script will begin listening for UDP packets on the specified IP and port, parse the ADIF data, and send new QSO records to the QRZ logbook via their API.
 
+3. To run the script in the background, 
 ## Logging
 
 `logListen` will log key events, including received ADIF messages, API responses, and errors to a log file. By default, this log file is `udp_listener.log`, but you can specify a custom log file path in the `config.ini` file.
