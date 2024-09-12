@@ -38,6 +38,7 @@ if QRZ_API_KEY is None:
 
 QRZ_LOGBOOK_API_URL = 'https://logbook.qrz.com/api'
 QUEUE_FILE = 'queue.json'  # File to store queued ADIF records
+EXCEPTION_FILE = 'exceptions.json'  # File to store exceptions
 
 # Configure logging to write to a file
 logging.basicConfig(
@@ -47,41 +48,94 @@ logging.basicConfig(
     filemode='a'  # 'a' for append mode, 'w' for overwrite mode
 )
 
+
 def load_queue():
     """Load the queue of failed messages from a file."""
     if os.path.exists(QUEUE_FILE):
+        logging.info("Loading queued records")
         with open(QUEUE_FILE, 'r') as file:
             return json.load(file)
     return []
+
 
 def save_queue(queue):
     """Save the queue to a file."""
     with open(QUEUE_FILE, 'w') as file:
         json.dump(queue, file)
 
+
+def move_to_exception(adif_message):
+    """Move a failed message to the exception file."""
+    if os.path.exists(EXCEPTION_FILE):
+        with open(EXCEPTION_FILE, 'r') as file:
+            exceptions = json.load(file)
+    else:
+        exceptions = []
+
+    exceptions.append(adif_message)
+    with open(EXCEPTION_FILE, 'w') as file:
+        json.dump(exceptions, file)
+    logging.info(f"Moved message to exception file: {adif_message}")
+
+
 def queue_adif_message(adif_message):
-    """Add an ADIF message to the queue and save it."""
+    """Add an ADIF message to the queue and save it only if it doesn't already exist."""
     queue = load_queue()
-    queue.append(adif_message)
-    save_queue(queue)
-    logging.info(f"Queued failed message: {adif_message}")
+
+    # Check if the message is already in the queue
+    if adif_message not in queue:
+        queue.append(adif_message)
+        save_queue(queue)
+        logging.info(f"Queued failed message: {adif_message}")
+    else:
+        logging.info(f"Message already in queue, skipping: {adif_message}")
+
 
 def retry_queue():
-    """Periodically try to resend messages from the queue."""
+    """Attempt to resend messages from the queue immediately on startup, then periodically retry."""
+    queue = load_queue()
+    total_records = len(queue)
+    successfully_sent = 0
+
+    if queue:
+        logging.info(f"Retrying {total_records} messages in the queue on startup...")
+        for adif_message in queue[:]:
+            try:
+                log_to_qrz(adif_message)  # Attempt to resend
+                queue.remove(adif_message)  # Remove on success
+                successfully_sent += 1
+                save_queue(queue)
+                logging.info("Successfully retried message on startup")
+                time.sleep(1)  # Wait 1 second between messages
+            except requests.exceptions.RequestException:
+                logging.error(f"Retry failed for message: {adif_message}")
+                continue  # Keep in queue if still failing
+
+    logging.info(f"Total records: {total_records}, Successfully sent: {successfully_sent}")
+
+    # After initial retry, periodically retry the queue
     while True:
         time.sleep(QUEUE_RETRY_INTERVAL)  # Wait for the retry interval (default 5 minutes)
         queue = load_queue()
+        total_records = len(queue)
+        successfully_sent = 0
+
         if queue:
-            logging.info("Retrying messages in the queue...")
+            logging.info(f"Retrying {total_records} messages in the queue...")
             for adif_message in queue[:]:
                 try:
                     log_to_qrz(adif_message)  # Attempt to resend
                     queue.remove(adif_message)  # Remove on success
+                    successfully_sent += 1
                     save_queue(queue)
+                    logging.info("Successfully retried message")
                     time.sleep(1)  # Wait 1 second between messages
                 except requests.exceptions.RequestException:
                     logging.error(f"Retry failed for message: {adif_message}")
                     continue  # Keep in queue if still failing
+
+        logging.info(f"Total records: {total_records}, Successfully sent: {successfully_sent}")
+
 
 # Function to log contact data to QRZ.com
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
@@ -99,15 +153,22 @@ def log_to_qrz(adif_message):
         }
 
         # Send the POST request to the QRZ API
+        logging.info(f"Sending message to QRZ: {adif_message}")
         response = requests.post(QRZ_LOGBOOK_API_URL, data=post_data, timeout=10)
         response.raise_for_status()
 
-        # Log response
-        logging.info(f"Log response: {response.status_code}, {response.text}")
+        # Check if the result is not OK, move to exception
+        if "RESULT=OK" not in response.text:
+            logging.error(f"QRZ API returned an error: {response.text}")
+            move_to_exception(adif_message)
+        else:
+            logging.info(f"Log response: {response.status_code}, {response.text}")
+
     except requests.exceptions.RequestException as e:
         logging.error(f"Error logging to QRZ: {e}")
         queue_adif_message(adif_message)  # Queue message if it fails
         raise
+
 
 # Parse ADIF fields from the message
 def parse_adif(adif_message):
@@ -118,10 +179,12 @@ def parse_adif(adif_message):
         adif_data[key] = value
     return adif_data
 
+
 def signal_handler(sig, frame):
     logging.info("Shutting down gracefully...")
     sock.close()
     sys.exit(0)
+
 
 # Set up the UDP listener
 def start_udp_listener():
@@ -156,6 +219,7 @@ def start_udp_listener():
     finally:
         sock.close()
 
+
 # Start queue retry thread
 queue_thread = threading.Thread(target=retry_queue, daemon=True)
 queue_thread.start()
@@ -165,4 +229,6 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == "__main__":
+    logging.info("Starting logListen service")
     start_udp_listener()
+    queue_thread.join()
