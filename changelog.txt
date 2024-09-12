@@ -1,0 +1,4 @@
+v0.3 12 September 2024
+- Added buffering for inbound QSOs
+- New config value for queue retry delay
+- Generally, logListen will try to send QSOs immediately but will retry each QUEUE_RETRY_INTERVAL

@@ -1,10 +1,3 @@
-# logListen
-# v0.2 11 Sep 2024
-# Author: Perry W1GRD perry@w1grd.radio
-# Listen for ADIF formatted messages via UDP from any
-# logging program that supports it and send new QSO records
-# to the QRZ XML API
-
 import socket
 import requests
 import re
@@ -12,7 +5,10 @@ import logging
 import os
 import signal
 import sys
-import configparser  # Import configparser for reading config files
+import time
+import json
+import threading
+import configparser
 from retrying import retry
 
 # Set up config parser
@@ -22,7 +18,8 @@ config = configparser.ConfigParser()
 defaults = {
     'LOG_FILE': 'udp_listener.log',  # Default log file
     'UDP_IP': '0.0.0.0',  # Listen on all interfaces
-    'UDP_PORT': '2237'  # Default UDP port
+    'UDP_PORT': '2237',  # Default UDP port
+    'QUEUE_RETRY_INTERVAL': '300'  # Default retry interval is 5 minutes (300 seconds)
 }
 
 # Read the config file (you can specify a path if needed)
@@ -32,6 +29,7 @@ config.read('config.ini')
 LOG_FILE = config.get('settings', 'LOG_FILE', fallback=defaults['LOG_FILE'])
 UDP_IP = config.get('settings', 'UDP_IP', fallback=defaults['UDP_IP'])
 UDP_PORT = int(config.get('settings', 'UDP_PORT', fallback=defaults['UDP_PORT']))
+QUEUE_RETRY_INTERVAL = int(config.get('settings', 'QUEUE_RETRY_INTERVAL', fallback=defaults['QUEUE_RETRY_INTERVAL']))
 QRZ_API_KEY = config.get('settings', 'QRZ_API_KEY', fallback=None)
 
 # Raise an error if the API key is not provided (no default for this one)
@@ -39,6 +37,7 @@ if QRZ_API_KEY is None:
     raise ValueError("QRZ_API_KEY must be set in the config file!")
 
 QRZ_LOGBOOK_API_URL = 'https://logbook.qrz.com/api'
+QUEUE_FILE = 'queue.json'  # File to store queued ADIF records
 
 # Configure logging to write to a file
 logging.basicConfig(
@@ -47,6 +46,42 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s: %(message)s',  # Log message format
     filemode='a'  # 'a' for append mode, 'w' for overwrite mode
 )
+
+def load_queue():
+    """Load the queue of failed messages from a file."""
+    if os.path.exists(QUEUE_FILE):
+        with open(QUEUE_FILE, 'r') as file:
+            return json.load(file)
+    return []
+
+def save_queue(queue):
+    """Save the queue to a file."""
+    with open(QUEUE_FILE, 'w') as file:
+        json.dump(queue, file)
+
+def queue_adif_message(adif_message):
+    """Add an ADIF message to the queue and save it."""
+    queue = load_queue()
+    queue.append(adif_message)
+    save_queue(queue)
+    logging.info(f"Queued failed message: {adif_message}")
+
+def retry_queue():
+    """Periodically try to resend messages from the queue."""
+    while True:
+        time.sleep(QUEUE_RETRY_INTERVAL)  # Wait for the retry interval (default 5 minutes)
+        queue = load_queue()
+        if queue:
+            logging.info("Retrying messages in the queue...")
+            for adif_message in queue[:]:
+                try:
+                    log_to_qrz(adif_message)  # Attempt to resend
+                    queue.remove(adif_message)  # Remove on success
+                    save_queue(queue)
+                    time.sleep(1)  # Wait 1 second between messages
+                except requests.exceptions.RequestException:
+                    logging.error(f"Retry failed for message: {adif_message}")
+                    continue  # Keep in queue if still failing
 
 # Function to log contact data to QRZ.com
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
@@ -71,6 +106,7 @@ def log_to_qrz(adif_message):
         logging.info(f"Log response: {response.status_code}, {response.text}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Error logging to QRZ: {e}")
+        queue_adif_message(adif_message)  # Queue message if it fails
         raise
 
 # Parse ADIF fields from the message
@@ -119,6 +155,10 @@ def start_udp_listener():
         logging.error(f"Unexpected error: {e}")
     finally:
         sock.close()
+
+# Start queue retry thread
+queue_thread = threading.Thread(target=retry_queue, daemon=True)
+queue_thread.start()
 
 # Graceful shutdown on SIGINT or SIGTERM
 signal.signal(signal.SIGINT, signal_handler)
